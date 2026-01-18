@@ -1,3 +1,3 @@
-# @mcpay/api2
+# @cronos402/api2
 
 ## null
