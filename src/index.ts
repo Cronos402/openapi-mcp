@@ -10,6 +10,12 @@ import getPort from 'get-port';
 
 const app = new Hono();
 
+// Global error handler - prevents server crashes
+app.onError((err, c) => {
+  console.error('[MCP] Unhandled error:', err);
+  return c.json({ error: err.message || 'Internal server error' }, 500);
+});
+
 type PrimitiveParam = string | number | boolean | null | undefined;
 type ParamsMap = Record<string, PrimitiveParam>;
 
@@ -347,9 +353,21 @@ const handler = (url: string) => {
         serverMetadata = await extractServerMetadata(url);
         console.log(`[MCP] Extracted server metadata:`, serverMetadata);
 
-        const tools = await getToolsFromOpenApi(url, {
-            dereference: true
-        });
+        let tools;
+        try {
+            tools = await getToolsFromOpenApi(url, {
+                dereference: true
+            });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to load OpenAPI spec';
+            console.error(`[MCP] Failed to get tools from ${url}:`, message);
+            // Register an error tool so the client knows what went wrong
+            server.tool('error', `Failed to load OpenAPI: ${message}`, {}, async () => ({
+                content: [{ type: 'text', text: `Error loading OpenAPI spec from ${url}: ${message}` }],
+                isError: true
+            }));
+            return;
+        }
 
     tools.forEach((tool) => {
         console.log(`[MCP] Tool:`, tool.name);
@@ -626,9 +644,16 @@ app.get('/inspect-mcp', async (c) => {
         return c.text('Missing url parameter', 400);
     }
 
-    const tools = await getToolsFromOpenApi(url, {
-        dereference: true
-    });
+    let tools;
+    try {
+        tools = await getToolsFromOpenApi(url, {
+            dereference: true
+        });
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to load OpenAPI spec';
+        console.error(`[MCP] Failed to inspect ${url}:`, message);
+        return c.json({ error: message, url }, 400);
+    }
 
     const ensureObjectInputSchema = (schema: unknown): Record<string, unknown> => {
         if (schema && typeof schema === 'object') {
@@ -656,8 +681,14 @@ app.all('/*', async (c) => {
     }
 
     console.log(`[MCP] Handling request for ${url}`);
-    const response = await handler(url)(c.req.raw);
-    return response;
+    try {
+        const response = await handler(url)(c.req.raw);
+        return response;
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to process request';
+        console.error(`[MCP] Handler error for ${url}:`, message);
+        return c.json({ error: message }, 500);
+    }
 });
 
 const portPromise = getPort({ port: process.env.PORT ? Number(process.env.PORT) : 3001 });
